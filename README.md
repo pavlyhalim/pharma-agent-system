@@ -545,7 +545,5 @@ If you use this platform in your research, please cite:
 
 ```
 Pharmacogenomics Drug Non-Response Analysis Platform
-https://github.com/[your-username]/pharma-agent-system
+https://github.com/pavlyhalim/pharma-agent-system
 ```
-
-(Note: Update with actual repository URL after publishing)
