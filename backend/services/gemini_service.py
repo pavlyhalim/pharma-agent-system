@@ -35,16 +35,21 @@ class GeminiService:
 
         Args:
             api_key: Google API key (defaults to GOOGLE_API_KEY env var)
-            rate_limit_rpm: Requests per minute limit (default 14, max 15 for gemini-2.5-flash-lite)
+            rate_limit_rpm: Requests per minute limit (default 14, max 15 for gemini-2.0-flash-exp)
         """
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
 
         # Rate limiting: Track requests per minute
+        # Default 14 RPM leaves 1 RPM safety margin under 15 RPM limit
+        # With concurrent processing, the rate limiter automatically queues requests
         self.rate_limit_rpm = rate_limit_rpm
         self.request_times: deque = deque()  # Track timestamps of requests
         self.rate_limit_lock = asyncio.Lock()
 
-        logger.info(f"Rate limiting set to {self.rate_limit_rpm} requests per minute")
+        logger.info(
+            f"Gemini service initialized with {self.rate_limit_rpm} RPM rate limit "
+            f"(concurrent requests supported with automatic queuing)"
+        )
 
         if not self.api_key:
             logger.warning("GOOGLE_API_KEY not set. Gemini service will not be available.")
@@ -103,7 +108,13 @@ class GeminiService:
 
             # Record this request
             self.request_times.append(datetime.now())
-            logger.debug(f"Rate limit status: {len(self.request_times)}/{self.rate_limit_rpm} RPM")
+
+            # Log rate limit status (useful for monitoring concurrent processing)
+            current_rpm = len(self.request_times)
+            if current_rpm >= self.rate_limit_rpm * 0.8:  # Log when approaching 80% of limit
+                logger.info(f"Rate limit status: {current_rpm}/{self.rate_limit_rpm} RPM (approaching limit)")
+            else:
+                logger.debug(f"Rate limit status: {current_rpm}/{self.rate_limit_rpm} RPM")
 
     async def _retry_with_exponential_backoff(
         self,

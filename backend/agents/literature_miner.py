@@ -222,48 +222,37 @@ Provide a concise summary with key findings."""
 
         return annotations + labels
 
-    async def _extract_from_clinical_trials(
+    async def _extract_single_trial(
         self,
-        trials: List[Dict[str, Any]],
+        trial: Dict[str, Any],
         drug: str,
-        progress_callback=None,
-        clinical_trials_count: int = 5
-    ) -> List[Dict[str, Any]]:
+        idx: int,
+        total: int,
+        progress_callback=None
+    ) -> Dict[str, Any]:
         """
-        Extract data from clinical trials using Gemini.
-
-        ClinicalTrials.gov trials have:
-        - EnrollmentCount (sample size)
-        - PrimaryOutcomeDescription (may contain results)
-        - BriefTitle, Condition
-
-        We'll use Gemini to extract response rates when available.
+        Extract data from a single clinical trial with Gemini.
 
         Args:
-            trials: List of clinical trials from ClinicalTrials.gov
+            trial: Clinical trial data
             drug: Drug name
-            progress_callback: Optional callback for progress updates
-            clinical_trials_count: Number of trials to process (1-20, default: 5)
+            idx: Trial index (1-based)
+            total: Total number of trials
+            progress_callback: Optional progress callback
+
+        Returns:
+            Enriched trial with extracted data
         """
-        enriched = []
+        if progress_callback:
+            await progress_callback({
+                "type": "progress",
+                "step": "extracting_trial",
+                "message": f"Extracting data from clinical trial {idx}/{total} (NCT: {trial.get('nct_id', 'unknown')})",
+                "progress": 35 + (idx / total) * 5  # Progress from 35% to 40%
+            })
 
-        # Process top trials that have enrollment data
-        trials_with_data = [t for t in trials if t.get('enrollment') and t.get('enrollment') > 0]
-        trials_to_process = trials_with_data[:clinical_trials_count]  # Use user's choice
-
-        total_trials = len(trials_to_process)
-
-        for idx, trial in enumerate(trials_to_process, 1):
-            if progress_callback:
-                await progress_callback({
-                    "type": "progress",
-                    "step": "extracting_trial",
-                    "message": f"Extracting data from clinical trial {idx}/{total_trials} (NCT: {trial.get('nct_id', 'unknown')})",
-                    "progress": 35 + (idx / total_trials) * 5  # Progress from 35% to 40%
-                })
-
-            # Build description from trial data
-            description = f"""
+        # Build description from trial data
+        description = f"""
 Title: {trial.get('title', '')}
 Condition: {trial.get('condition', '')}
 Intervention: {trial.get('intervention', '')}
@@ -272,13 +261,12 @@ Primary Outcome: {trial.get('primary_outcome_measure', '')}
 Primary Outcome Description: {trial.get('primary_outcome_description', '')}
 """
 
-            if len(description.strip()) < 100:
-                enriched.append(trial)
-                continue
+        if len(description.strip()) < 100:
+            return trial
 
-            try:
-                # Use Gemini to extract response data
-                prompt = f"""Extract clinical response data from this clinical trial about {drug}.
+        try:
+            # Use Gemini to extract response data
+            prompt = f"""Extract clinical response data from this clinical trial about {drug}.
 
 Trial Information:
 {description}
@@ -296,94 +284,144 @@ Extract:
 - endpoint (primary outcome measure)
 """
 
-                extracted_data = await self.gemini.generate_structured(
-                    prompt=prompt,
-                    response_schema=ExtractedClinicalData,
-                    temperature=0
-                )
+            extracted_data = await self.gemini.generate_structured(
+                prompt=prompt,
+                response_schema=ExtractedClinicalData,
+                temperature=0
+            )
 
-                if extracted_data:
-                    # Always use enrollment as sample size
-                    if not extracted_data.sample_size:
-                        extracted_data.sample_size = trial.get('enrollment', 0)
+            if extracted_data:
+                # Always use enrollment as sample size
+                if not extracted_data.sample_size:
+                    extracted_data.sample_size = trial.get('enrollment', 0)
 
-                    # Validate extracted data
-                    if extracted_data.sample_size and extracted_data.sample_size >= 10:
-                        if extracted_data.response_rate is not None or extracted_data.non_response_rate is not None:
-                            # Validate rates
-                            valid = True
-                            if extracted_data.response_rate is not None:
-                                valid = valid and (0 <= extracted_data.response_rate <= 1)
-                            if extracted_data.non_response_rate is not None:
-                                valid = valid and (0 <= extracted_data.non_response_rate <= 1)
+                # Validate extracted data
+                if extracted_data.sample_size and extracted_data.sample_size >= 10:
+                    if extracted_data.response_rate is not None or extracted_data.non_response_rate is not None:
+                        # Validate rates
+                        valid = True
+                        if extracted_data.response_rate is not None:
+                            valid = valid and (0 <= extracted_data.response_rate <= 1)
+                        if extracted_data.non_response_rate is not None:
+                            valid = valid and (0 <= extracted_data.non_response_rate <= 1)
 
-                            if valid:
-                                trial.update({
-                                    "sample_size": extracted_data.sample_size,
-                                    "response_rate": extracted_data.response_rate,
-                                    "non_response_rate": extracted_data.non_response_rate,
-                                    "endpoint": extracted_data.endpoint or trial.get('primary_outcome_measure', '')
-                                })
-                                logger.info(
-                                    f"Extracted VALID data from trial {trial.get('nct_id')}: "
-                                    f"n={extracted_data.sample_size}, "
-                                    f"response={extracted_data.response_rate}, "
-                                    f"non_response={extracted_data.non_response_rate}"
-                                )
-                            else:
-                                logger.warning(f"Extracted INVALID data from trial {trial.get('nct_id')}: Invalid rates")
+                        if valid:
+                            trial.update({
+                                "sample_size": extracted_data.sample_size,
+                                "response_rate": extracted_data.response_rate,
+                                "non_response_rate": extracted_data.non_response_rate,
+                                "endpoint": extracted_data.endpoint or trial.get('primary_outcome_measure', '')
+                            })
+                            logger.info(
+                                f"Extracted VALID data from trial {trial.get('nct_id')}: "
+                                f"n={extracted_data.sample_size}, "
+                                f"response={extracted_data.response_rate}, "
+                                f"non_response={extracted_data.non_response_rate}"
+                            )
+                        else:
+                            logger.warning(f"Extracted INVALID data from trial {trial.get('nct_id')}: Invalid rates")
 
-            except Exception as e:
-                logger.warning(f"Failed to extract data from trial {trial.get('nct_id')}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to extract data from trial {trial.get('nct_id')}: {e}")
 
-            enriched.append(trial)
-            await asyncio.sleep(1.5)  # Rate limiting
+        return trial
 
-        return enriched
-
-    async def _extract_response_data_gemini(
+    async def _extract_from_clinical_trials(
         self,
-        articles: List[Dict[str, Any]],
+        trials: List[Dict[str, Any]],
         drug: str,
         progress_callback=None,
-        article_count: int = 5
+        clinical_trials_count: int = 5
     ) -> List[Dict[str, Any]]:
         """
-        Use Gemini with structured output to extract data from abstracts.
+        Extract data from clinical trials using Gemini (CONCURRENT VERSION).
+
+        Processes multiple trials in parallel using asyncio.Semaphore to limit
+        concurrent requests while respecting rate limits.
 
         Args:
-            articles: List of articles with abstracts
-            drug: Drug name for context
+            trials: List of clinical trials from ClinicalTrials.gov
+            drug: Drug name
             progress_callback: Optional callback for progress updates
-            article_count: Number of articles to process (1-20, default: 5)
+            clinical_trials_count: Number of trials to process (1-20, default: 5)
 
         Returns:
-            Enriched articles with extracted data
+            Enriched trials with extracted data
         """
-        enriched = []
+        # Process top trials that have enrollment data
+        trials_with_data = [t for t in trials if t.get('enrollment') and t.get('enrollment') > 0]
+        trials_to_process = trials_with_data[:clinical_trials_count]  # Use user's choice
 
-        # Filter out low-quality abstracts (<200 chars) before processing
-        # Then process user-specified number of articles (default 5)
-        filtered_articles = [a for a in articles if a.get("abstract") and len(a.get("abstract", "")) >= 200]
-        articles_to_process = filtered_articles[:article_count]  # Use user's choice
+        total_trials = len(trials_to_process)
 
-        total_articles = len(articles_to_process)
+        if total_trials == 0:
+            return []
 
-        for idx, article in enumerate(articles_to_process, 1):
-            abstract = article.get("abstract", "")
+        # Process trials concurrently with semaphore to limit concurrent requests
+        # Limit to 5 concurrent requests to avoid overwhelming the API
+        semaphore = asyncio.Semaphore(5)
 
-            # Send progress update for this article
-            if progress_callback:
-                await progress_callback({
-                    "type": "progress",
-                    "step": "extracting_article",
-                    "message": f"Extracting data from article {idx}/{total_articles} (PMID: {article.get('pmid', 'unknown')})",
-                    "progress": 10 + (idx / total_articles) * 25  # Progress from 10% to 35%
-                })
+        async def _extract_with_limit(trial, idx):
+            async with semaphore:
+                # Rate limiter in gemini_service will handle timing automatically
+                return await self._extract_single_trial(
+                    trial, drug, idx, total_trials, progress_callback
+                )
 
-            try:
-                # Use Gemini's structured output with STRICT validation
-                prompt = f"""Extract ONLY explicitly stated clinical response data from this abstract about {drug}.
+        # Create tasks for all trials
+        tasks = [
+            _extract_with_limit(trial, idx)
+            for idx, trial in enumerate(trials_to_process, 1)
+        ]
+
+        # Execute all tasks concurrently, return_exceptions=True to handle individual failures
+        enriched = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Filter out exceptions and log them
+        result = []
+        for trial_result in enriched:
+            if isinstance(trial_result, Exception):
+                logger.error(f"Trial extraction failed: {trial_result}")
+            else:
+                result.append(trial_result)
+
+        return result
+
+    async def _extract_single_article(
+        self,
+        article: Dict[str, Any],
+        drug: str,
+        idx: int,
+        total: int,
+        progress_callback=None
+    ) -> Dict[str, Any]:
+        """
+        Extract data from a single article with Gemini.
+
+        Args:
+            article: Article with abstract
+            drug: Drug name
+            idx: Article index (1-based)
+            total: Total number of articles
+            progress_callback: Optional progress callback
+
+        Returns:
+            Enriched article with extracted data
+        """
+        abstract = article.get("abstract", "")
+
+        # Send progress update for this article
+        if progress_callback:
+            await progress_callback({
+                "type": "progress",
+                "step": "extracting_article",
+                "message": f"Extracting data from article {idx}/{total} (PMID: {article.get('pmid', 'unknown')})",
+                "progress": 10 + (idx / total) * 25  # Progress from 10% to 35%
+            })
+
+        try:
+            # Use Gemini's structured output with STRICT validation
+            prompt = f"""Extract ONLY explicitly stated clinical response data from this abstract about {drug}.
 
 Abstract:
 {abstract}
@@ -406,70 +444,125 @@ Extract information about:
 
 If you cannot find explicit numbers for sample_size, response_rate, or non_response_rate in the abstract text, set ALL fields to null. Do not guess or infer."""
 
-                # Use Gemini's structured output with Pydantic schema
-                extracted_data = await self.gemini.generate_structured(
-                    prompt=prompt,
-                    response_schema=ExtractedClinicalData,
-                    temperature=0
+            # Use Gemini's structured output with Pydantic schema
+            extracted_data = await self.gemini.generate_structured(
+                prompt=prompt,
+                response_schema=ExtractedClinicalData,
+                temperature=0
+            )
+
+            if extracted_data:
+                # STRICT VALIDATION: Only use data if it meets quality thresholds
+                is_valid = False
+                validation_reason = "No data extracted"
+
+                # Check if we have minimum required data (sample size + outcome)
+                if extracted_data.sample_size and extracted_data.sample_size >= 10:
+                    if extracted_data.response_rate is not None or extracted_data.non_response_rate is not None:
+                        # Validate rates are in valid range
+                        if extracted_data.response_rate is not None:
+                            if 0 <= extracted_data.response_rate <= 1:
+                                is_valid = True
+                            else:
+                                validation_reason = f"Invalid response_rate: {extracted_data.response_rate}"
+                        if extracted_data.non_response_rate is not None:
+                            if 0 <= extracted_data.non_response_rate <= 1:
+                                is_valid = True
+                            else:
+                                validation_reason = f"Invalid non_response_rate: {extracted_data.non_response_rate}"
+                    else:
+                        validation_reason = "No outcome rates extracted"
+                else:
+                    validation_reason = f"Sample size too small or missing: {extracted_data.sample_size}"
+
+                if is_valid:
+                    # Merge with article
+                    article.update({
+                        "sample_size": extracted_data.sample_size,
+                        "response_rate": extracted_data.response_rate,
+                        "non_response_rate": extracted_data.non_response_rate,
+                        "endpoint": extracted_data.endpoint,
+                        "subgroups": [sg.model_dump() for sg in extracted_data.subgroups],
+                        "has_genetic_data": extracted_data.has_genetic_data,
+                        "genetic_markers": extracted_data.genetic_markers
+                    })
+                    logger.info(
+                        f"Extracted VALID data from PMID {article.get('pmid')}: "
+                        f"n={extracted_data.sample_size}, "
+                        f"response={extracted_data.response_rate}, "
+                        f"non_response={extracted_data.non_response_rate}"
+                    )
+                else:
+                    logger.warning(
+                        f"Extracted INVALID data from PMID {article.get('pmid')}: {validation_reason}"
+                    )
+
+        except Exception as e:
+            logger.warning(f"Failed to extract data from PMID {article.get('pmid')}: {e}")
+
+        return article
+
+    async def _extract_response_data_gemini(
+        self,
+        articles: List[Dict[str, Any]],
+        drug: str,
+        progress_callback=None,
+        article_count: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Use Gemini with structured output to extract data from abstracts (CONCURRENT VERSION).
+
+        Processes multiple articles in parallel using asyncio.Semaphore to limit
+        concurrent requests while respecting rate limits.
+
+        Args:
+            articles: List of articles with abstracts
+            drug: Drug name for context
+            progress_callback: Optional callback for progress updates
+            article_count: Number of articles to process (1-20, default: 5)
+
+        Returns:
+            Enriched articles with extracted data
+        """
+        # Filter out low-quality abstracts (<200 chars) before processing
+        # Then process user-specified number of articles (default 5)
+        filtered_articles = [a for a in articles if a.get("abstract") and len(a.get("abstract", "")) >= 200]
+        articles_to_process = filtered_articles[:article_count]  # Use user's choice
+
+        total_articles = len(articles_to_process)
+
+        if total_articles == 0:
+            return []
+
+        # Process articles concurrently with semaphore to limit concurrent requests
+        # Limit to 5 concurrent requests to avoid overwhelming the API
+        semaphore = asyncio.Semaphore(5)
+
+        async def _extract_with_limit(article, idx):
+            async with semaphore:
+                # Rate limiter in gemini_service will handle timing automatically
+                return await self._extract_single_article(
+                    article, drug, idx, total_articles, progress_callback
                 )
 
-                if extracted_data:
-                    # STRICT VALIDATION: Only use data if it meets quality thresholds
-                    is_valid = False
-                    validation_reason = "No data extracted"
+        # Create tasks for all articles
+        tasks = [
+            _extract_with_limit(article, idx)
+            for idx, article in enumerate(articles_to_process, 1)
+        ]
 
-                    # Check if we have minimum required data (sample size + outcome)
-                    if extracted_data.sample_size and extracted_data.sample_size >= 10:
-                        if extracted_data.response_rate is not None or extracted_data.non_response_rate is not None:
-                            # Validate rates are in valid range
-                            if extracted_data.response_rate is not None:
-                                if 0 <= extracted_data.response_rate <= 1:
-                                    is_valid = True
-                                else:
-                                    validation_reason = f"Invalid response_rate: {extracted_data.response_rate}"
-                            if extracted_data.non_response_rate is not None:
-                                if 0 <= extracted_data.non_response_rate <= 1:
-                                    is_valid = True
-                                else:
-                                    validation_reason = f"Invalid non_response_rate: {extracted_data.non_response_rate}"
-                        else:
-                            validation_reason = "No outcome rates extracted"
-                    else:
-                        validation_reason = f"Sample size too small or missing: {extracted_data.sample_size}"
+        # Execute all tasks concurrently, return_exceptions=True to handle individual failures
+        enriched = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    if is_valid:
-                        # Merge with article
-                        article.update({
-                            "sample_size": extracted_data.sample_size,
-                            "response_rate": extracted_data.response_rate,
-                            "non_response_rate": extracted_data.non_response_rate,
-                            "endpoint": extracted_data.endpoint,
-                            "subgroups": [sg.model_dump() for sg in extracted_data.subgroups],
-                            "has_genetic_data": extracted_data.has_genetic_data,
-                            "genetic_markers": extracted_data.genetic_markers
-                        })
-                        logger.info(
-                            f"Extracted VALID data from PMID {article.get('pmid')}: "
-                            f"n={extracted_data.sample_size}, "
-                            f"response={extracted_data.response_rate}, "
-                            f"non_response={extracted_data.non_response_rate}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Extracted INVALID data from PMID {article.get('pmid')}: {validation_reason}"
-                        )
+        # Filter out exceptions and log them
+        result = []
+        for article_result in enriched:
+            if isinstance(article_result, Exception):
+                logger.error(f"Article extraction failed: {article_result}")
+            else:
+                result.append(article_result)
 
-            except Exception as e:
-                logger.warning(f"Failed to extract data from PMID {article.get('pmid')}: {e}")
-
-            enriched.append(article)
-
-            # Rate limiting: 1.5 seconds per request (optimized for 5 articles)
-            # With 5 articles, this gives ~7.5 seconds total delay
-            # Well within Gemini 10 RPM limit while being 4x faster
-            await asyncio.sleep(1.5)
-
-        return enriched
+        return result
 
     async def close(self):
         """Clean up resources."""
