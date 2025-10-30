@@ -1,0 +1,41 @@
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.6.0
+pydantic-settings==2.1.0
+
+# AI/Agent Framework
+langchain==0.1.20
+langgraph==0.0.55
+
+# Google Gemini (PRIMARY AI ENGINE - Gemini 2.5 Flash)
+google-genai==0.2.0
+
+# Data Processing
+pandas==2.2.0
+numpy==1.26.3
+scipy==1.12.0
+
+# Bioinformatics & Pharmacogenomics
+biopython==1.83
+pandasgwas==0.1.0
+
+# HTTP & API
+httpx==0.26.0
+requests==2.31.0
+aiohttp==3.9.3
+
+# Statistical Analysis
+statsmodels==0.14.1
+scikit-learn==1.4.0
+
+# Utilities
+python-dotenv==1.0.1
+pydantic-settings==2.1.0
+tenacity==8.2.3
+
+# Development
+pytest==8.0.0
+pytest-asyncio==0.23.4
+black==24.1.1
+ruff==0.2.1
