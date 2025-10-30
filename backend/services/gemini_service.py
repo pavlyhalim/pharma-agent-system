@@ -12,6 +12,8 @@ from google import genai
 from google.genai import types
 import os
 import logging
+from collections import deque
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +29,22 @@ class GeminiService:
     - Structured output support
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, rate_limit_rpm: int = 14):
         """
-        Initialize Gemini service.
+        Initialize Gemini service with rate limiting.
 
         Args:
             api_key: Google API key (defaults to GOOGLE_API_KEY env var)
+            rate_limit_rpm: Requests per minute limit (default 14, max 15 for gemini-2.5-flash-lite)
         """
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+
+        # Rate limiting: Track requests per minute
+        self.rate_limit_rpm = rate_limit_rpm
+        self.request_times: deque = deque()  # Track timestamps of requests
+        self.rate_limit_lock = asyncio.Lock()
+
+        logger.info(f"Rate limiting set to {self.rate_limit_rpm} requests per minute")
 
         if not self.api_key:
             logger.warning("GOOGLE_API_KEY not set. Gemini service will not be available.")
@@ -51,6 +61,49 @@ class GeminiService:
     def is_available(self) -> bool:
         """Check if Gemini service is available."""
         return self.client is not None
+
+    async def _enforce_rate_limit(self):
+        """
+        Enforce rate limiting by tracking requests per minute.
+
+        Implements sliding window rate limiting:
+        - Removes requests older than 60 seconds
+        - If at limit, waits until oldest request expires
+        - Adds current request timestamp
+
+        gemini-2.5-flash-lite limits:
+        - 15 RPM (requests per minute)
+        - 250K TPM (tokens per minute)
+        - 1K RPD (requests per day)
+        """
+        async with self.rate_limit_lock:
+            current_time = datetime.now()
+            minute_ago = current_time - timedelta(seconds=60)
+
+            # Remove requests older than 1 minute
+            while self.request_times and self.request_times[0] < minute_ago:
+                self.request_times.popleft()
+
+            # If we're at the rate limit, wait until we can make another request
+            if len(self.request_times) >= self.rate_limit_rpm:
+                # Calculate how long to wait (oldest request + 60s - now)
+                oldest_request = self.request_times[0]
+                wait_until = oldest_request + timedelta(seconds=60)
+                wait_seconds = (wait_until - current_time).total_seconds()
+
+                if wait_seconds > 0:
+                    logger.info(
+                        f"Rate limit reached ({len(self.request_times)}/{self.rate_limit_rpm} RPM). "
+                        f"Waiting {wait_seconds:.2f}s..."
+                    )
+                    await asyncio.sleep(wait_seconds + 0.1)  # Add 100ms buffer
+
+                    # Remove the oldest request after waiting
+                    self.request_times.popleft()
+
+            # Record this request
+            self.request_times.append(datetime.now())
+            logger.debug(f"Rate limit status: {len(self.request_times)}/{self.rate_limit_rpm} RPM")
 
     async def _retry_with_exponential_backoff(
         self,
@@ -135,7 +188,7 @@ class GeminiService:
     async def generate_with_grounding(
         self,
         prompt: str,
-        model: str = "gemini-2.5-flash-lite",
+        model: str = "gemini-2.0-flash-exp",
         temperature: float = 0.0,
         max_tokens: int = 4096,
         system_instruction: Optional[str] = None
@@ -145,7 +198,7 @@ class GeminiService:
 
         Args:
             prompt: User prompt
-            model: Gemini model to use
+            model: Gemini model to use (default: gemini-2.0-flash-exp)
             temperature: Sampling temperature (0.0-2.0)
             max_tokens: Maximum output tokens
             system_instruction: Optional system instruction
@@ -155,6 +208,9 @@ class GeminiService:
         """
         if not self.is_available():
             raise RuntimeError("Gemini service not available. Check GOOGLE_API_KEY.")
+
+        # Enforce rate limiting before API call
+        await self._enforce_rate_limit()
 
         # Configure grounding tool
         grounding_tool = types.Tool(google_search=types.GoogleSearch())
@@ -234,7 +290,7 @@ class GeminiService:
     async def generate_without_grounding(
         self,
         prompt: str,
-        model: str = "gemini-2.5-flash-lite",
+        model: str = "gemini-2.0-flash-exp",
         temperature: float = 0.0,
         max_tokens: int = 4096,
         system_instruction: Optional[str] = None
@@ -254,6 +310,9 @@ class GeminiService:
         """
         if not self.is_available():
             raise RuntimeError("Gemini service not available. Check GOOGLE_API_KEY.")
+
+        # Enforce rate limiting before API call
+        await self._enforce_rate_limit()
 
         config = types.GenerateContentConfig(
             temperature=temperature,
@@ -294,7 +353,7 @@ class GeminiService:
         self,
         prompt: str,
         response_schema: type,
-        model: str = "gemini-2.5-flash-lite",
+        model: str = "gemini-2.0-flash-exp",
         temperature: float = 0.0
     ) -> Any:
         """
@@ -311,6 +370,9 @@ class GeminiService:
         """
         if not self.is_available():
             raise RuntimeError("Gemini service not available. Check GOOGLE_API_KEY.")
+
+        # Enforce rate limiting before API call
+        await self._enforce_rate_limit()
 
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -335,7 +397,7 @@ class GeminiService:
         self,
         prompt: str,
         context_documents: List[str],
-        model: str = "gemini-2.5-flash-lite",
+        model: str = "gemini-2.0-flash-exp",
         use_grounding: bool = True
     ) -> Dict[str, Any]:
         """
@@ -456,7 +518,7 @@ class GeminiService:
     async def chat(
         self,
         messages: List[Dict[str, str]],
-        model: str = "gemini-2.5-flash-lite",
+        model: str = "gemini-2.0-flash-exp",
         use_grounding: bool = False
     ) -> Dict[str, Any]:
         """

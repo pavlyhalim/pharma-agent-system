@@ -10,8 +10,65 @@ from pydantic import BaseModel, Field
 from models.schemas import AgentState
 from services.gemini_service import GeminiService
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def clean_markdown(text: str) -> str:
+    """
+    Remove markdown formatting from text to make it readable for normal users.
+
+    Removes:
+    - **bold** and __bold__
+    - *italic* and _italic_
+    - # headers
+    - [links](url)
+    - `code`
+    - > blockquotes
+    - - and * bullets
+    - HTML tags
+
+    Args:
+        text: Text with markdown formatting
+
+    Returns:
+        Clean plain text
+    """
+    if not text:
+        return text
+
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # Remove headers (##, ###, etc.)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+
+    # Remove bold and italic (keep the text)
+    text = re.sub(r'\*\*\*(.+?)\*\*\*', r'\1', text)  # Bold+italic
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)      # Bold
+    text = re.sub(r'__(.+?)__', r'\1', text)          # Bold (underscore)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)          # Italic
+    text = re.sub(r'_(.+?)_', r'\1', text)            # Italic (underscore)
+
+    # Remove links [text](url) - keep only text
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+
+    # Remove code blocks
+    text = re.sub(r'```[^\n]*\n(.+?)\n```', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'`([^`]+)`', r'\1', text)  # Inline code
+
+    # Remove blockquotes
+    text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
+
+    # Remove bullet points (keep the content)
+    text = re.sub(r'^[-*+]\s+', '', text, flags=re.MULTILINE)
+
+    # Remove extra whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = text.strip()
+
+    return text
 
 
 class Hypothesis(BaseModel):
@@ -288,11 +345,11 @@ Use the recent evidence provided to get REAL clinical data and specific recommen
                         # Extract title (usually first line or bolded text)
                         title_match = re.search(r'\*\*(.+?)\*\*|^(.+?)(?:\n|$)', content)
                         title = title_match.group(1) or title_match.group(2) if title_match else f"Strategy {rank}"
-                        title = title[:100].strip()  # Limit length
+                        title = clean_markdown(title)[:100].strip()  # Clean and limit length
 
                         # Extract implementation (look for "Implementation:" section)
                         impl_match = re.search(r'Implementation:?\s*(.+?)(?=\n\n|\n[A-Z]|Evidence:|$)', content, re.DOTALL | re.IGNORECASE)
-                        implementation = impl_match.group(1).strip() if impl_match else content[:200]
+                        implementation = clean_markdown(impl_match.group(1).strip() if impl_match else content[:200])
 
                         # Extract confidence
                         conf_match = re.search(r'Confidence:?\s*(high|moderate|low)', content, re.IGNORECASE)
@@ -303,8 +360,8 @@ Use the recent evidence provided to get REAL clinical data and specific recommen
                         evidence_match = re.search(r'Evidence:?\s*(.+?)(?=\n\n|\nImplementation:|$)', content, re.DOTALL | re.IGNORECASE)
                         if evidence_match:
                             ev_text = evidence_match.group(1)
-                            # Extract bullet points or citations
-                            evidence = [e.strip('- ').strip() for e in ev_text.split('\n') if e.strip()]
+                            # Extract bullet points or citations and clean markdown
+                            evidence = [clean_markdown(e.strip('- ').strip()) for e in ev_text.split('\n') if e.strip()]
 
                         # Add citations from grounding (safely handle None)
                         if citations and isinstance(citations, list):
@@ -315,7 +372,7 @@ Use the recent evidence provided to get REAL clinical data and specific recommen
                         hypotheses.append({
                             "rank": rank,
                             "title": title,
-                            "rationale": content[:500].strip(),  # First part is usually rationale
+                            "rationale": clean_markdown(content[:500].strip()),  # Clean markdown from rationale
                             "evidence": evidence[:5] if evidence else ["Based on pharmacogenomics literature"],
                             "confidence": confidence,
                             "implementation": implementation[:300]
@@ -333,8 +390,8 @@ Use the recent evidence provided to get REAL clinical data and specific recommen
                     for i, paragraph in enumerate(paragraphs[:3], 1):
                         # Extract title from first line
                         lines = paragraph.split('\n')
-                        title = lines[0].strip('*# ').strip()[:100]
-                        
+                        title = clean_markdown(lines[0].strip('*# ').strip())[:100]
+
                         # Use REAL Gemini output (with grounding), not fake data
                         # Safely extract citations (handle None)
                         evidence_list = []
@@ -346,10 +403,10 @@ Use the recent evidence provided to get REAL clinical data and specific recommen
                         hypotheses.append({
                             "rank": i,
                             "title": title or f"Evidence-based strategy {i}",
-                            "rationale": paragraph[:500],
+                            "rationale": clean_markdown(paragraph[:500]),
                             "evidence": evidence_list,
                             "confidence": "moderate",
-                            "implementation": lines[-1][:300] if len(lines) > 1 else paragraph[:300]
+                            "implementation": clean_markdown(lines[-1][:300] if len(lines) > 1 else paragraph[:300])
                         })
                 else:
                     # Last resort: use single hypothesis with all content
@@ -363,10 +420,10 @@ Use the recent evidence provided to get REAL clinical data and specific recommen
                     hypotheses.append({
                         "rank": 1,
                         "title": "Clinical evidence-based recommendation from Gemini",
-                        "rationale": response_text[:500],
+                        "rationale": clean_markdown(response_text[:500]),
                         "evidence": evidence_list,
                         "confidence": "moderate",
-                        "implementation": response_text[500:800] if len(response_text) > 500 else response_text[:300]
+                        "implementation": clean_markdown(response_text[500:800] if len(response_text) > 500 else response_text[:300])
                     })
                     logger.warning("Used fallback single-hypothesis format")
 
