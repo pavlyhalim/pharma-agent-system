@@ -358,8 +358,9 @@ Extract:
             return []
 
         # Process trials concurrently with semaphore to limit concurrent requests
-        # Limit to 5 concurrent requests to avoid overwhelming the API
-        semaphore = asyncio.Semaphore(5)
+        # Limit to 3 concurrent requests to prevent rate limit bursts
+        # With gemini-2.0-flash-lite (30 RPM) and 0.2s spacing, 3 concurrent is optimal
+        semaphore = asyncio.Semaphore(3)
 
         async def _extract_with_limit(trial, idx):
             async with semaphore:
@@ -535,8 +536,9 @@ If you cannot find explicit numbers for sample_size, response_rate, or non_respo
             return []
 
         # Process articles concurrently with semaphore to limit concurrent requests
-        # Limit to 5 concurrent requests to avoid overwhelming the API
-        semaphore = asyncio.Semaphore(5)
+        # Limit to 3 concurrent requests to prevent rate limit bursts
+        # With gemini-2.0-flash-lite (30 RPM) and 0.2s spacing, 3 concurrent is optimal
+        semaphore = asyncio.Semaphore(3)
 
         async def _extract_with_limit(article, idx):
             async with semaphore:

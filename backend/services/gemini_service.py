@@ -29,18 +29,19 @@ class GeminiService:
     - Structured output support
     """
 
-    def __init__(self, api_key: Optional[str] = None, rate_limit_rpm: int = 14):
+    def __init__(self, api_key: Optional[str] = None, rate_limit_rpm: int = 28):
         """
         Initialize Gemini service with rate limiting.
 
         Args:
             api_key: Google API key (defaults to GOOGLE_API_KEY env var)
-            rate_limit_rpm: Requests per minute limit (default 14, max 15 for gemini-2.0-flash-exp)
+            rate_limit_rpm: Requests per minute limit (default 28 for gemini-2.0-flash-lite with 30 RPM limit)
         """
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
 
         # Rate limiting: Track requests per minute
-        # Default 14 RPM leaves 1 RPM safety margin under 15 RPM limit
+        # gemini-2.0-flash-lite has 30 RPM limit (2x gemini-2.0-flash)
+        # Default 28 RPM leaves 2 RPM safety margin
         # With concurrent processing, the rate limiter automatically queues requests
         self.rate_limit_rpm = rate_limit_rpm
         self.request_times: deque = deque()  # Track timestamps of requests
@@ -108,6 +109,11 @@ class GeminiService:
 
             # Record this request
             self.request_times.append(datetime.now())
+
+            # Add minimum 0.2s spacing between requests to prevent sub-second bursts
+            # Google enforces per-second rate limits in addition to RPM limits
+            # At 30 RPM (0.5 req/sec), 0.2s spacing = 5 req/sec max locally (10x margin)
+            await asyncio.sleep(0.2)
 
             # Log rate limit status (useful for monitoring concurrent processing)
             current_rpm = len(self.request_times)
@@ -199,7 +205,7 @@ class GeminiService:
     async def generate_with_grounding(
         self,
         prompt: str,
-        model: str = "gemini-2.0-flash-exp",
+        model: str = "gemini-2.0-flash-lite",
         temperature: float = 0.0,
         max_tokens: int = 4096,
         system_instruction: Optional[str] = None
@@ -209,7 +215,7 @@ class GeminiService:
 
         Args:
             prompt: User prompt
-            model: Gemini model to use (default: gemini-2.0-flash-exp)
+            model: Gemini model to use (default: gemini-2.0-flash)
             temperature: Sampling temperature (0.0-2.0)
             max_tokens: Maximum output tokens
             system_instruction: Optional system instruction
@@ -301,7 +307,7 @@ class GeminiService:
     async def generate_without_grounding(
         self,
         prompt: str,
-        model: str = "gemini-2.0-flash-exp",
+        model: str = "gemini-2.0-flash-lite",
         temperature: float = 0.0,
         max_tokens: int = 4096,
         system_instruction: Optional[str] = None
@@ -364,7 +370,7 @@ class GeminiService:
         self,
         prompt: str,
         response_schema: type,
-        model: str = "gemini-2.0-flash-exp",
+        model: str = "gemini-2.0-flash-lite",
         temperature: float = 0.0
     ) -> Any:
         """
@@ -408,7 +414,7 @@ class GeminiService:
         self,
         prompt: str,
         context_documents: List[str],
-        model: str = "gemini-2.0-flash-exp",
+        model: str = "gemini-2.0-flash-lite",
         use_grounding: bool = True
     ) -> Dict[str, Any]:
         """
@@ -529,7 +535,7 @@ class GeminiService:
     async def chat(
         self,
         messages: List[Dict[str, str]],
-        model: str = "gemini-2.0-flash-exp",
+        model: str = "gemini-2.0-flash-lite",
         use_grounding: bool = False
     ) -> Dict[str, Any]:
         """
